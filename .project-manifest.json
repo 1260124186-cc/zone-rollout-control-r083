@@ -39,6 +39,11 @@
       "responsibility": "probe aggregation, deterministic verdicts, and latest result reads"
     },
     {
+      "id": "campaign",
+      "path": "internal/campaign",
+      "responsibility": "release campaign grouping, ordered membership, campaign-scoped abort, reconciliation, and coordinated close"
+    },
+    {
       "id": "domain",
       "path": "internal/domain",
       "responsibility": "entities, DNS value validation, transitions, and stable errors"
@@ -151,6 +156,28 @@
         "httpapi",
         "assessment",
         "probe",
+        "domain",
+        "storage"
+      ]
+    },
+    {
+      "id": "release-campaign-coordination",
+      "name": "Release campaign coordination",
+      "entry": "PUT /v1/campaigns -> plans -> order -> abort -> reconcile -> close",
+      "steps": [
+        "create a campaign with identity and owner and link plans in an explicit order",
+        "reject duplicate joins, cross-campaign joins, and cyclic or inconsistent orders",
+        "abort a plan at campaign scope without touching the plan state machine",
+        "reconcile read-only progress from plan state and surface positional blockers",
+        "close only when every non-aborted plan is completed; serialize concurrent closes with optimistic versioning"
+      ],
+      "success": "the campaign groups ordered plans, derives aggregate progress, and closes once independent plan completions and campaign aborts converge",
+      "failure": "duplicate joins, cyclic orders, premature close, closed-campaign mutation, and stale concurrent versions are rejected without modifying plans or leaving partial state",
+      "verification": "workflowprobe release-campaign-coordination exercises ordering, abort, reconcile, blocked and concurrent close, idempotent replay, and plan state invariance",
+      "module_ids": [
+        "httpapi",
+        "campaign",
+        "plan",
         "domain",
         "storage"
       ]

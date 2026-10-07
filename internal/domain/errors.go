@@ -19,6 +19,10 @@ const (
 	CodeLeaseNotClaimed     ErrorCode = "lease_not_claimed"
 	CodeNoProbes            ErrorCode = "no_probes"
 	CodeConflict            ErrorCode = "conflict"
+	CodeDuplicatePlanJoin   ErrorCode = "duplicate_plan_join"
+	CodeInvalidPlanOrder    ErrorCode = "invalid_plan_order"
+	CodeCampaignNotOpen     ErrorCode = "campaign_not_open"
+	CodeCampaignNotClosable ErrorCode = "campaign_not_closable"
 	CodeStorageFailure      ErrorCode = "storage_failure"
 	CodeInternal            ErrorCode = "internal_error"
 )

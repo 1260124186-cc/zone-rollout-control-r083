@@ -71,12 +71,15 @@ func statusCode(code domain.ErrorCode) int {
 		domain.CodeVersionConflict,
 		domain.CodeIdempotencyConflict,
 		domain.CodeDuplicateRevision,
+		domain.CodeDuplicatePlanJoin,
+		domain.CodeInvalidPlanOrder,
+		domain.CodeCampaignNotOpen,
 		domain.CodeNodeUnavailable,
 		domain.CodeLeaseExpired,
 		domain.CodeLeaseNotClaimed,
 		domain.CodeConflict:
 		return http.StatusConflict
-	case domain.CodeNoProbes:
+	case domain.CodeNoProbes, domain.CodeCampaignNotClosable:
 		return http.StatusUnprocessableEntity
 	case domain.CodeStorageFailure, domain.CodeInternal:
 		return http.StatusInternalServerError

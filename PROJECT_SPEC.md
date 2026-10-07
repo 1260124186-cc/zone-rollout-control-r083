@@ -82,6 +82,33 @@ Zone Rollout Control 是面向 DNS 运维人员的 Go HTTP 控制面。它把区
 - `probe_count`、`success_count`、`success_ratio`、`maximum_latency_ms`。
 - `created_at`。
 
+### ReleaseCampaign
+
+把属于同一次大版本发布的多个区域计划分组、排序并汇总的发布活动。活动是协调者，不替代任何计划自身的状态机。
+
+- `id`：服务生成的稳定标识。
+- `name`、`owner`：活动名称与负责人。
+- `state`：`open` 或 `closed`。
+- `plan_ids`：成员计划的**有序**标识数组，是权威的全序，顺序即发布顺序。
+- `version`：每次活动聚合变化后递增，关闭、加入、排序、活动级中止和重协调都递增。
+- `created_at`、`opened_at`、`closed_at`：RFC3339 时间。
+- `latest_progress`、`reconciled_at`：最近一次重协调或关闭时的只读进度快照。
+
+### CampaignMembership
+
+一个计划在某个活动中的位置和活动级生命周期。它只记录协调状态，从不镜像或覆盖计划自己的可变状态。
+
+- `campaign_id`、`plan_id`：复合身份。
+- `position`：在活动全序中的位置。
+- `state`：`active` 或 `aborted`。
+- `joined_at`、`aborted_at`、`abort_reason`。
+
+活动只读聚合（不落库为权威状态，每次读取即时计算）：
+
+- `members`：按位置排序的成员视图，含计划当前状态、最近判定结论、是否需要审核、活动级中止原因，以及该成员的阻塞原因。
+- `progress`：`total_plans`、`completed_plans`、`aborted_plans`、`pending_plans`、`completion_ratio`、`ready_to_close`、`blocking_reasons`。
+- 阻塞原因稳定代码：`plan_not_found`、`plan_in_draft`、`plan_in_active`。已完成和活动级中止的成员不产生阻塞。
+
 ## 4. 状态和规则
 
 ### 滚动计划状态
@@ -141,6 +168,27 @@ ready --lease--> leased --report--> ready
 - `serial_mismatch`
 - `success_ratio_below_minimum`
 - `latency_limit_exceeded`
+
+### 发布活动状态与协调规则
+
+```text
+open --close--> closed
+```
+
+成员（活动级）：
+
+```text
+active --abort--> aborted
+```
+
+- 只有 `open` 活动可以加入计划、重新排序、活动级中止计划或重协调；`closed` 活动拒绝一切成员变更。
+- 活动**从不写入计划、版本、租约、探针或判定**：聚合进度完全由计划当前状态只读推导，计划继续走自己的 `draft -> active -> completed` 状态机。
+- 活动级中止只把成员标记为 `aborted`，不改变计划自身状态；被中止的成员不再阻塞关闭。
+- 加入规则：计划必须存在；同一计划同一时刻最多属于一个活动（由计划到活动的索引保证）；同一请求内重复、已在本活动中、已属于其他活动都返回 `duplicate_plan_join`。成员上限为 100。
+- 排序规则：新顺序必须恰好包含当前成员集合，不能少、不能多、不能重复、不能引用未加入的计划。因为权威顺序是一个线性全序，任何循环顺序都会退化为重复或未知标识并被拒绝，返回 `invalid_plan_order`。
+- 关闭规则：关闭前先重协调，只有每个非中止成员的计划都已 `completed` 才允许 `open -> closed`，否则整笔事务不产生任何修改并返回 `campaign_not_closable`，同时按位置给出 `blocking_reasons`。
+- 部分失败重新协调：计划中止、计划完成与活动关闭是彼此独立的状态机。任何一者先发生都不会修改另外两者；调用重协调或关闭会即时重新读取计划状态并收敛，因此中途失败后可安全重试。
+- 并发关闭：所有写操作由同一把互斥锁串行化。关闭携带 `expected_version`，版本不匹配返回 `version_conflict`，因此两个并发关闭恰好一个成功、另一个冲突；不带版本号或对已关闭活动的关闭调用是幂等重放。
 
 ## 5. 工作流
 
@@ -212,6 +260,30 @@ ready --lease--> leased --report--> ready
 
 失败行为：缺少区域版本、没有探针、请求键冲突或保存失败不会更新计划摘要。
 
+### W5 发布活动编排
+
+入口：
+
+- `PUT /v1/campaigns`
+- `GET /v1/campaigns`
+- `GET /v1/campaigns/{id}`
+- `PATCH /v1/campaigns/{id}/plans`
+- `PATCH /v1/campaigns/{id}/plans/order`
+- `PATCH /v1/campaigns/{id}/plans/{plan_id}/abort`
+- `PATCH /v1/campaigns/{id}/reconcile`
+- `PATCH /v1/campaigns/{id}/close`
+
+步骤：
+
+1. HTTP 层严格解码 JSON。
+2. 活动服务校验身份、负责人、成员集合、全序和状态迁移。
+3. 存储层在锁内复制状态后修改活动与成员，并原子替换快照。
+4. 读取、重协调和关闭时由纯领域计算器从计划当前状态推导成员视图、进度与阻塞原因。
+
+成功行为：活动按显式顺序关联多个计划，活动级中止独立于计划，所有非中止计划完成后可关闭活动并得到只读聚合。
+
+失败行为：重复加入、跨活动加入、循环/不一致顺序、对已关闭活动变更、未满足关闭条件或版本冲突都不会修改状态；活动在任何一步都不修改计划。
+
 ## 6. 模块边界
 
 | 模块 | 路径 | 责任 |
@@ -223,6 +295,7 @@ ready --lease--> leased --report--> ready
 | allocation | `internal/allocation` | 节点筛选、幂等分配组和租约生命周期 |
 | probe | `internal/probe` | 探针校验、幂等写入和租约完成 |
 | assessment | `internal/assessment` | 探针聚合和一致性判定 |
+| campaign | `internal/campaign` | 发布活动分组、排序、活动级中止、重协调和关闭编排 |
 | domain | `internal/domain` | 聚合、值校验、状态迁移和纯计算 |
 | store | `internal/store` | 锁内副本事务和原子 JSON 持久化 |
 | platform | `internal/platform` | 时钟、标识、游标和文件锁 |
@@ -260,12 +333,21 @@ ready --lease--> leased --report--> ready
 - `PATCH /v1/leases/{id}/probes`
 - `PATCH /v1/plans/{id}/assessments`
 - `GET /v1/plans/{id}/assessments/latest`
+- `PUT /v1/campaigns`
+- `GET /v1/campaigns`
+- `GET /v1/campaigns/{id}`
+- `PATCH /v1/campaigns/{id}/plans`
+- `PATCH /v1/campaigns/{id}/plans/order`
+- `PATCH /v1/campaigns/{id}/plans/{plan_id}/abort`
+- `PATCH /v1/campaigns/{id}/reconcile`
+- `PATCH /v1/campaigns/{id}/close`
 
 ## 8. 工程机制
 
-- 状态迁移：计划、节点和租约使用显式迁移表。
-- 乐观并发：计划版本不匹配时拒绝变更。
-- 幂等写入：租约分配和探针登记都保存请求键和载荷指纹。
+- 状态迁移：计划、节点、租约和发布活动使用显式迁移表。
+- 乐观并发：计划和发布活动版本不匹配时拒绝变更。
+- 只读协调：发布活动只读取计划状态推导聚合，从不修改计划，保证单计划接口与状态机独立。
+- 幂等写入：租约分配和探针登记都保存请求键和载荷指纹；对已关闭活动的关闭调用是幂等重放。
 - 资源生命周期：租约带截止时间，支持释放、完成和过期清理。
 - 原子持久化：事务先复制状态，成功后再通过临时文件替换快照。
 - 错误传播：领域错误稳定映射到 HTTP 状态和错误代码。
@@ -282,5 +364,6 @@ ready --lease--> leased --report--> ready
 2. 节点分配、租约唯一性、幂等重放和无可用节点冲突。
 3. 探针首写、同键重放、同键异载荷冲突和释放冲突。
 4. 一致性通过、审核触发、最新结果查询和幂等重放。
+5. 发布活动创建、有序关联、重复加入与跨活动拒绝、循环顺序拒绝、活动级中止不改计划、部分失败后重协调、阻塞关闭、并发关闭恰好一个成功和关闭后幂等重放。
 
 每条探针使用独立临时目录，不访问外部网络，结束后关闭服务。
