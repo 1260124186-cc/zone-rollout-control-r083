@@ -44,6 +44,11 @@
       "responsibility": "entities, DNS value validation, transitions, and stable errors"
     },
     {
+      "id": "campaign",
+      "path": "internal/campaign",
+      "responsibility": "release campaign grouping, ordered membership, and close coordination"
+    },
+    {
       "id": "storage",
       "path": "internal/store",
       "responsibility": "copy-on-write transactions and atomic JSON snapshots"
@@ -151,6 +156,28 @@
         "httpapi",
         "assessment",
         "probe",
+        "domain",
+        "storage"
+      ]
+    },
+    {
+      "id": "release-campaign",
+      "name": "Release campaign coordination",
+      "entry": "PUT /v1/campaigns -> plans -> progress -> close",
+      "steps": [
+        "create a campaign with identity, owner, and start time",
+        "attach plans with explicit after-ordering constraints",
+        "derive read-only aggregated progress and blocking reasons",
+        "abort or complete member plans through their own endpoints",
+        "close the campaign once every member plan is terminal"
+      ],
+      "success": "the campaign closes after all member plans reach a terminal state and exposes deterministic ordered progress",
+      "failure": "duplicate memberships, ordering cycles, non-terminal closes, and concurrent closes return stable errors without partial writes",
+      "verification": "workflowprobe release-campaign orders plans, rejects duplicates and cycles, coordinates aborts and completion, and races concurrent closes",
+      "module_ids": [
+        "httpapi",
+        "campaign",
+        "plan",
         "domain",
         "storage"
       ]

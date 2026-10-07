@@ -8,6 +8,14 @@ const (
 	PlanDraft     PlanState = "draft"
 	PlanActive    PlanState = "active"
 	PlanCompleted PlanState = "completed"
+	PlanAborted   PlanState = "aborted"
+)
+
+type CampaignState string
+
+const (
+	CampaignOpen   CampaignState = "open"
+	CampaignClosed CampaignState = "closed"
 )
 
 type NodeState string
@@ -71,6 +79,54 @@ type RolloutPlan struct {
 	CreatedAt           time.Time  `json:"created_at"`
 	ActivatedAt         *time.Time `json:"activated_at,omitempty"`
 	CompletedAt         *time.Time `json:"completed_at,omitempty"`
+	AbortedAt           *time.Time `json:"aborted_at,omitempty"`
+}
+
+type CampaignMember struct {
+	PlanID  string    `json:"plan_id"`
+	After   []string  `json:"after"`
+	AddedAt time.Time `json:"added_at"`
+}
+
+type ReleaseCampaign struct {
+	ID        string           `json:"id"`
+	Name      string           `json:"name"`
+	Owner     string           `json:"owner"`
+	State     CampaignState    `json:"state"`
+	Version   uint64           `json:"version"`
+	Members   []CampaignMember `json:"members"`
+	StartedAt time.Time        `json:"started_at"`
+	ClosedAt  *time.Time       `json:"closed_at,omitempty"`
+}
+
+type CampaignBlocker struct {
+	PlanID   string    `json:"plan_id"`
+	Position int       `json:"position"`
+	State    PlanState `json:"state"`
+	Reason   string    `json:"reason"`
+}
+
+type CampaignPlanProgress struct {
+	PlanID        string    `json:"plan_id"`
+	Position      int       `json:"position"`
+	Zone          string    `json:"zone"`
+	State         PlanState `json:"state"`
+	After         []string  `json:"after"`
+	LatestVerdict Verdict   `json:"latest_verdict,omitempty"`
+}
+
+type CampaignProgress struct {
+	CampaignID     string                 `json:"campaign_id"`
+	State          CampaignState          `json:"state"`
+	PlanCount      int                    `json:"plan_count"`
+	DraftCount     int                    `json:"draft_count"`
+	ActiveCount    int                    `json:"active_count"`
+	CompletedCount int                    `json:"completed_count"`
+	AbortedCount   int                    `json:"aborted_count"`
+	TerminalCount  int                    `json:"terminal_count"`
+	Closable       bool                   `json:"closable"`
+	Blocking       []CampaignBlocker      `json:"blocking"`
+	Plans          []CampaignPlanProgress `json:"plans"`
 }
 
 type ResolverNode struct {
@@ -154,6 +210,7 @@ type State struct {
 	Assessments           map[string]RolloutAssessment `json:"assessments"`
 	LeaseRequestKeys      map[string]string            `json:"lease_request_keys"`
 	AssessmentRequestKeys map[string]string            `json:"assessment_request_keys"`
+	Campaigns             map[string]ReleaseCampaign   `json:"campaigns"`
 	AuditEvents           []AuditEvent                 `json:"audit_events"`
 }
 
@@ -170,4 +227,9 @@ type PlanPage struct {
 type NodePage struct {
 	Items []ResolverNode `json:"items"`
 	Meta  PageMeta       `json:"meta"`
+}
+
+type CampaignPage struct {
+	Items []ReleaseCampaign `json:"items"`
+	Meta  PageMeta          `json:"meta"`
 }

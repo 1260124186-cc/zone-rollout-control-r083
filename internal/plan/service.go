@@ -167,6 +167,34 @@ func (s *Service) Complete(
 	return plan, err
 }
 
+func (s *Service) Abort(
+	ctx context.Context,
+	planID string,
+	expectedVersion uint64,
+) (domain.RolloutPlan, error) {
+	var plan domain.RolloutPlan
+	err := s.store.Write(ctx, func(state *domain.State) error {
+		current, ok := state.Plans[planID]
+		if !ok {
+			return domain.NotFound("plan", planID)
+		}
+		if current.Version != expectedVersion {
+			return versionConflict(planID, expectedVersion, current.Version)
+		}
+		now := s.clock.Now().UTC()
+		if err := domain.AbortPlan(&current, now); err != nil {
+			return err
+		}
+		state.Plans[planID] = current
+		store.AddAudit(state, s.ids, "plan", planID, "aborted", now, map[string]any{
+			"version": current.Version,
+		})
+		plan = current
+		return nil
+	})
+	return plan, err
+}
+
 func (s *Service) Get(ctx context.Context, planID string) (domain.RolloutPlan, error) {
 	var plan domain.RolloutPlan
 	err := s.store.Read(ctx, func(state *domain.State) error {

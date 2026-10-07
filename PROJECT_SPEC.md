@@ -2,7 +2,7 @@
 
 ## 1. 项目目标
 
-Zone Rollout Control 是面向 DNS 运维人员的 Go HTTP 控制面。它把区域版本编排、解析节点领取租约、探针结果登记和一致性判定串成一条可追溯的上线链。服务只使用本机 JSON 快照，不连接真实 DNS 网络，也不依赖外部平台。
+Zone Rollout Control 是面向 DNS 运维人员的 Go HTTP 控制面。它把区域版本编排、解析节点领取租约、探针结果登记、一致性判定和跨计划的发布活动串成一条可追溯的上线链。服务只使用本机 JSON 快照，不连接真实 DNS 网络，也不依赖外部平台。
 
 本仓库是健康项目初始化基线，要求可构建、可运行、无预置缺陷。测试在本阶段有意延后，由后续测试阶段补充；当前通过真实 HTTP 路由上的工作流探针进行生产路径验证。
 
@@ -82,18 +82,47 @@ Zone Rollout Control 是面向 DNS 运维人员的 Go HTTP 控制面。它把区
 - `probe_count`、`success_count`、`success_ratio`、`maximum_latency_ms`。
 - `created_at`。
 
+### ReleaseCampaign
+
+把属于同一次大版本发布的多个计划编组、排序并汇总的发布活动。
+
+- `id`：服务生成的稳定标识。
+- `name`：发布名称，3 到 120 个字符。
+- `owner`：负责人，2 到 120 个字符。
+- `state`：`open` 或 `closed`。
+- `version`：每次活动聚合变化后递增。
+- `members`：成员数组，每项包含 `plan_id`、`after`（必须排在其前的成员计划标识）和 `added_at`；数组顺序即加入顺序。
+- `started_at`、`closed_at`：RFC3339 时间。
+
+活动只读引用计划，不修改计划，也不替代计划自己的状态机。
+
 ## 4. 状态和规则
 
 ### 滚动计划状态
 
 ```text
 draft --activate--> active --complete--> completed
+draft --abort--> aborted
+active --abort--> aborted
 ```
 
 - 只有 `draft` 可以激活。
 - 只有 `active` 可以完成。
+- 只有 `draft` 或 `active` 可以中止；`completed` 和 `aborted` 都是终态。
 - 激活后不能继续添加区域版本。
-- 激活和完成需要匹配当前版本。
+- 激活、完成和中止需要匹配当前版本。
+
+### 发布活动状态
+
+```text
+open --close--> closed
+```
+
+- 只有 `open` 可以关闭，关闭需要匹配当前版本。
+- 关闭要求全部成员计划处于终态（`completed` 或 `aborted`），否则返回 `campaign_blocked` 并列出阻塞计划。
+- 成员只能在 `open` 时加入；同一计划重复加入同一活动返回 `duplicate_plan`。
+- 成员顺序由 `after` 约束声明，服务以确定性拓扑排序（并列时按加入顺序）给出执行顺序；约束成环返回 `order_cycle`。
+- 并发关闭只有一个成功，其余返回 `version_conflict`；关闭被阻塞时可修复计划后带当前版本重试。
 
 ### 节点与租约生命周期
 
@@ -212,6 +241,28 @@ ready --lease--> leased --report--> ready
 
 失败行为：缺少区域版本、没有探针、请求键冲突或保存失败不会更新计划摘要。
 
+### W5 发布活动编排
+
+入口：
+
+- `PUT /v1/campaigns`
+- `PATCH /v1/campaigns/{id}/plans`
+- `GET /v1/campaigns/{id}/progress`
+- `PATCH /v1/campaigns/{id}/close`
+- `PATCH /v1/plans/{id}/abort`
+
+步骤：
+
+1. HTTP 层严格解码 JSON。
+2. 活动服务校验名称、负责人、成员批次和顺序约束。
+3. 存储层在锁内写入活动并原子替换状态快照。
+4. 计划通过自身接口推进或中止，活动只读聚合并报告阻塞原因。
+5. 全部成员计划进入终态后按当前版本关闭活动。
+
+成功行为：活动按 `open -> closed` 迁移，成员顺序确定，聚合进度只读。
+
+失败行为：重复成员、循环顺序、未终态关闭、版本冲突或并发关闭不会产生部分状态。
+
 ## 6. 模块边界
 
 | 模块 | 路径 | 责任 |
@@ -223,6 +274,7 @@ ready --lease--> leased --report--> ready
 | allocation | `internal/allocation` | 节点筛选、幂等分配组和租约生命周期 |
 | probe | `internal/probe` | 探针校验、幂等写入和租约完成 |
 | assessment | `internal/assessment` | 探针聚合和一致性判定 |
+| campaign | `internal/campaign` | 发布活动分组、顺序约束和关闭协调 |
 | domain | `internal/domain` | 聚合、值校验、状态迁移和纯计算 |
 | store | `internal/store` | 锁内副本事务和原子 JSON 持久化 |
 | platform | `internal/platform` | 时钟、标识、游标和文件锁 |
@@ -260,6 +312,13 @@ ready --lease--> leased --report--> ready
 - `PATCH /v1/leases/{id}/probes`
 - `PATCH /v1/plans/{id}/assessments`
 - `GET /v1/plans/{id}/assessments/latest`
+- `PATCH /v1/plans/{id}/abort`
+- `PUT /v1/campaigns`
+- `GET /v1/campaigns`
+- `GET /v1/campaigns/{id}`
+- `PATCH /v1/campaigns/{id}/plans`
+- `GET /v1/campaigns/{id}/progress`
+- `PATCH /v1/campaigns/{id}/close`
 
 ## 8. 工程机制
 
@@ -282,5 +341,6 @@ ready --lease--> leased --report--> ready
 2. 节点分配、租约唯一性、幂等重放和无可用节点冲突。
 3. 探针首写、同键重放、同键异载荷冲突和释放冲突。
 4. 一致性通过、审核触发、最新结果查询和幂等重放。
+5. 发布活动创建、顺序约束、重复与循环拒绝、聚合进度、计划中止、关闭协调和并发关闭。
 
 每条探针使用独立临时目录，不访问外部网络，结束后关闭服务。

@@ -1,6 +1,6 @@
 # Zone Rollout Control
 
-Zone Rollout Control 是仅依赖 Go 标准库的本机 HTTP 控制面，用于协调区域版本上线。它管理滚动计划、不可变区域版本、解析节点租约、探针结果和一致性判定。
+Zone Rollout Control 是仅依赖 Go 标准库的本机 HTTP 控制面，用于协调区域版本上线。它管理滚动计划、不可变区域版本、解析节点租约、探针结果、一致性判定，以及把多次计划编组为一次大版本发布的发布活动。
 
 本仓库是健康项目初始化基线。当前不包含单元测试、夹具或浏览器测试；测试工作有意延后到后续测试阶段。现在通过真实 HTTP 路由的生产探针验证构建和四条核心工作流。
 
@@ -45,6 +45,7 @@ internal/fleet              解析节点档案服务
 internal/allocation         节点选择和租约生命周期
 internal/probe              探针登记、幂等重放和租约完成
 internal/assessment         一致性聚合和最新结果查询
+internal/campaign           发布活动分组、顺序约束和关闭协调
 internal/httpapi            HTTP 路由、中间件和响应映射
 internal/workflowprobe      真实 HTTP 路径验证
 ```
@@ -135,6 +136,28 @@ curl -sS -X PATCH http://127.0.0.1:8090/v1/plans/<plan_id>/assessments \
   -d '{"request_key": "assess-request-0001"}'
 ```
 
+把多个计划编入同一次发布活动并按顺序关闭：
+
+```bash
+# 创建发布活动
+curl -sS -X PUT http://127.0.0.1:8090/v1/campaigns \
+  -H 'Content-Type: application/json' \
+  -d '{"name": "2026.10-major-release", "owner": "release-lead"}'
+
+# 关联计划，after 声明顺序约束（plan_b 排在 plan_a 之后）
+curl -sS -X PATCH http://127.0.0.1:8090/v1/campaigns/<campaign_id>/plans \
+  -H 'Content-Type: application/json' \
+  -d '{"members": [{"plan_id": "<plan_a>"}, {"plan_id": "<plan_b>", "after": ["<plan_a>"]}]}'
+
+# 只读聚合进度与阻塞原因
+curl -sS http://127.0.0.1:8090/v1/campaigns/<campaign_id>/progress
+
+# 计划全部完成或中止后关闭活动
+curl -sS -X PATCH http://127.0.0.1:8090/v1/campaigns/<campaign_id>/close \
+  -H 'Content-Type: application/json' \
+  -d '{"expected_version": 2}'
+```
+
 ## API 概览
 
 成功响应：
@@ -178,16 +201,26 @@ curl -sS -X PATCH http://127.0.0.1:8090/v1/plans/<plan_id>/assessments \
 | `PATCH` | `/v1/leases/{id}/probes` | 登记探针并完成租约 |
 | `PATCH` | `/v1/plans/{id}/assessments` | 创建一致性判定 |
 | `GET` | `/v1/plans/{id}/assessments/latest` | 查询最近判定 |
+| `PATCH` | `/v1/plans/{id}/abort` | 中止草稿或进行中的计划 |
+| `PUT` | `/v1/campaigns` | 创建发布活动 |
+| `GET` | `/v1/campaigns` | 按状态分页查询发布活动 |
+| `GET` | `/v1/campaigns/{id}` | 查询发布活动 |
+| `PATCH` | `/v1/campaigns/{id}/plans` | 按顺序约束关联计划 |
+| `GET` | `/v1/campaigns/{id}/progress` | 只读聚合进度与阻塞原因 |
+| `PATCH` | `/v1/campaigns/{id}/close` | 关闭发布活动 |
 
 ## 状态及失败行为
 
-- 计划按 `draft -> active -> completed` 单向迁移，激活和完成需要匹配版本。
+- 计划按 `draft -> active -> completed` 单向迁移，激活和完成需要匹配版本；草稿或进行中可 `abort` 为终态 `aborted`。
 - 区域版本只在计划草稿状态可追加，序列号严格递增且内容不可变。
 - A、AAAA、CNAME 条目在写入前规范化并稳定排序，重复条目直接拒绝。
 - 节点按 `ready -> leased -> ready` 变化，隔离节点不会被选中。
 - 一个节点同一时刻最多有一个 `claimed` 租约。
 - 相同请求键和相同内容可安全重放；同键异载荷返回 `idempotency_conflict`。
 - 一致性判定综合节点覆盖率、序列号、成功比例和最大延迟，返回 `consistent` 或 `review_required`。
+- 发布活动按 `open -> closed` 迁移，记录名称、负责人、开始和关闭时间；关闭需要匹配版本且全部成员计划处于终态（`completed` 或 `aborted`）。
+- 活动成员通过 `after` 约束声明顺序，服务以确定性拓扑排序给出执行顺序；重复加入返回 `duplicate_plan`，循环顺序返回 `order_cycle`。
+- 活动只读聚合计划状态，不修改计划，也不替代计划自己的状态机；关闭被阻塞时返回 `campaign_blocked`，修复计划后可带当前版本重试；并发关闭只有一个成功，其余返回 `version_conflict`。
 - 所有校验和冲突在快照替换前返回，不留下部分状态。
 
 ## 后续工程任务的行为边界
@@ -216,6 +249,7 @@ go run ./cmd/workflowprobe plan-revision-lifecycle
 go run ./cmd/workflowprobe node-lease-allocation
 go run ./cmd/workflowprobe probe-ingestion
 go run ./cmd/workflowprobe consistency-assessment
+go run ./cmd/workflowprobe release-campaign
 ```
 
 探针不访问外部网络，也不依赖已有状态文件。

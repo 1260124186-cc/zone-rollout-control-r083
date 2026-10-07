@@ -9,13 +9,20 @@ import (
 )
 
 const (
-	MaxZoneRunes       = 253
-	MaxAuthorityRunes  = 253
-	MaxNodeNameRunes   = 180
-	MaxRegionRunes     = 48
-	MinRequestKeyRunes = 8
-	MaxRequestKeyRunes = 64
-	MaxEntries         = 500
+	MaxZoneRunes          = 253
+	MaxAuthorityRunes     = 253
+	MaxNodeNameRunes      = 180
+	MaxRegionRunes        = 48
+	MinRequestKeyRunes    = 8
+	MaxRequestKeyRunes    = 64
+	MaxEntries            = 500
+	MinCampaignNameRunes  = 3
+	MaxCampaignNameRunes  = 120
+	MinCampaignOwnerRunes = 2
+	MaxCampaignOwnerRunes = 120
+	MaxCampaignPlans      = 500
+	MaxCampaignPlanBatch  = 100
+	MaxMemberAfterRefs    = 100
 )
 
 type PlanCreateInput struct {
@@ -54,6 +61,20 @@ type ProbeInput struct {
 
 type AssessmentInput struct {
 	RequestKey string `json:"request_key"`
+}
+
+type CampaignCreateInput struct {
+	Name  string `json:"name"`
+	Owner string `json:"owner"`
+}
+
+type CampaignMemberInput struct {
+	PlanID string   `json:"plan_id"`
+	After  []string `json:"after"`
+}
+
+type CampaignPlansInput struct {
+	Members []CampaignMemberInput `json:"members"`
 }
 
 func NormalizePlanInput(input PlanCreateInput) PlanCreateInput {
@@ -245,6 +266,84 @@ func ValidateAssessmentInput(input AssessmentInput) error {
 		return Validation("assessment input is invalid", map[string]any{
 			"request_key": err.Error(),
 		})
+	}
+	return nil
+}
+
+func NormalizeCampaignCreateInput(input CampaignCreateInput) CampaignCreateInput {
+	input.Name = strings.TrimSpace(input.Name)
+	input.Owner = strings.TrimSpace(input.Owner)
+	return input
+}
+
+func ValidateCampaignCreateInput(input CampaignCreateInput) error {
+	input = NormalizeCampaignCreateInput(input)
+	details := make(map[string]any)
+	if count := utf8.RuneCountInString(input.Name); count < MinCampaignNameRunes || count > MaxCampaignNameRunes {
+		details["name"] = "must contain between 3 and 120 characters"
+	}
+	if count := utf8.RuneCountInString(input.Owner); count < MinCampaignOwnerRunes || count > MaxCampaignOwnerRunes {
+		details["owner"] = "must contain between 2 and 120 characters"
+	}
+	if len(details) > 0 {
+		return Validation("campaign input is invalid", details)
+	}
+	return nil
+}
+
+func NormalizeCampaignPlansInput(input CampaignPlansInput) CampaignPlansInput {
+	members := make([]CampaignMemberInput, 0, len(input.Members))
+	for _, member := range input.Members {
+		after := make([]string, 0, len(member.After))
+		for _, predecessor := range member.After {
+			after = append(after, strings.TrimSpace(predecessor))
+		}
+		members = append(members, CampaignMemberInput{
+			PlanID: strings.TrimSpace(member.PlanID),
+			After:  after,
+		})
+	}
+	return CampaignPlansInput{Members: members}
+}
+
+func ValidateCampaignPlansInput(input CampaignPlansInput) error {
+	if len(input.Members) < 1 || len(input.Members) > MaxCampaignPlanBatch {
+		return Validation("campaign plans input is invalid", map[string]any{
+			"members": "must contain between 1 and 100 items",
+		})
+	}
+	seen := make(map[string]struct{}, len(input.Members))
+	for _, member := range input.Members {
+		if member.PlanID == "" {
+			return Validation("campaign plans input is invalid", map[string]any{
+				"plan_id": "is required",
+			})
+		}
+		if _, exists := seen[member.PlanID]; exists {
+			return Validation("campaign plans input is invalid", map[string]any{
+				"plan_id": "is duplicated in the request",
+			})
+		}
+		seen[member.PlanID] = struct{}{}
+		if len(member.After) > MaxMemberAfterRefs {
+			return Validation("campaign plans input is invalid", map[string]any{
+				"after": "must contain at most 100 entries",
+			})
+		}
+		predecessors := make(map[string]struct{}, len(member.After))
+		for _, predecessor := range member.After {
+			if predecessor == "" {
+				return Validation("campaign plans input is invalid", map[string]any{
+					"after": "must not contain empty plan ids",
+				})
+			}
+			if _, exists := predecessors[predecessor]; exists {
+				return Validation("campaign plans input is invalid", map[string]any{
+					"after": "must reference each plan at most once",
+				})
+			}
+			predecessors[predecessor] = struct{}{}
+		}
 	}
 	return nil
 }

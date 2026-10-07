@@ -37,7 +37,8 @@ func (s *Server) listPlans(w http.ResponseWriter, r *http.Request) {
 		limit = parsed
 	}
 	state := domain.PlanState(strings.TrimSpace(r.URL.Query().Get("state")))
-	if state != "" && state != domain.PlanDraft && state != domain.PlanActive && state != domain.PlanCompleted {
+	if state != "" && state != domain.PlanDraft && state != domain.PlanActive &&
+		state != domain.PlanCompleted && state != domain.PlanAborted {
 		sendError(w, r, domain.Validation("plan state is not supported", map[string]any{"state": state}))
 		return
 	}
@@ -101,6 +102,24 @@ func (s *Server) completePlan(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	result, err := s.plans.Complete(r.Context(), r.PathValue("id"), input.ExpectedVersion)
+	if err != nil {
+		sendError(w, r, err)
+		return
+	}
+	sendData(w, r, http.StatusOK, result)
+}
+
+func (s *Server) abortPlan(w http.ResponseWriter, r *http.Request) {
+	var input versionInput
+	if err := decode(w, r, &input); err != nil {
+		sendError(w, r, err)
+		return
+	}
+	if input.ExpectedVersion == 0 {
+		sendError(w, r, domain.Validation("expected_version must be greater than zero", nil))
+		return
+	}
+	result, err := s.plans.Abort(r.Context(), r.PathValue("id"), input.ExpectedVersion)
 	if err != nil {
 		sendError(w, r, err)
 		return
